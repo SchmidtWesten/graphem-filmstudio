@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Graphem-Filmstudio V6 Aufnahme</title>
+<style>
+html,body{margin:0;height:100%;font-family:Arial,sans-serif;background:#fff;color:#111}
+#setup{box-sizing:border-box;min-height:100%;padding:22px;display:flex;flex-direction:column;gap:15px}
+h1{font-size:24px;margin:0 0 2px}
+textarea{font-size:22px;min-height:120px;padding:12px;border:1px solid #aaa;border-radius:10px}
+.rules{font-size:15px;line-height:1.45;color:#444}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+select,button{font-size:18px;padding:11px 15px;border-radius:10px;border:1px solid #999;background:#fff}
+#start{background:#111;color:#fff;border-color:#111;font-weight:bold}
+#stage{display:none;position:fixed;inset:0;background:white;overflow:hidden;touch-action:manipulation}
+#wordbox{position:absolute;white-space:pre-wrap;font-weight:500;line-height:1.15;max-width:90vw;text-align:left}
+#next{display:none;position:absolute;right:18px;bottom:18px;font-size:15px;padding:8px 11px;opacity:.65}
+#count{position:absolute;inset:0;display:none;align-items:center;justify-content:center;font-size:72px}
+</style>
+</head>
+<body>
+<div id="setup">
+<h1>Graphem-Filmstudio</h1>
+<textarea id="input">Sch u  l e</textarea>
+<button id="start" style="margin-top:10px">FILM VORBEREITEN</button>
+<div class="rules">
+1 Leerzeichen = Graphemende<br>
+2 Leerzeichen = Silbenende<br>
+/ = Wortende<br>
+Return = fester Zeilenumbruch<br>Bei längeren Sätzen erfolgt zusätzlich automatischer Zeilenumbruch.
+</div>
+<div class="row">
+<label for="tempo"><b>Schreibtempo:</b></label>
+<select id="tempo">
+<option value="slow">langsam</option>
+<option value="calm" selected>ruhig</option>
+<option value="normal">normal</option>
+</select>
+</div>
+<div class="row">
+<label><input type="radio" name="mode" value="auto" checked> automatisch</label>
+<label><input type="radio" name="mode" value="manual"> manuell</label>
+</div>
+
+<div class="row" style="display:none">
+<label for="voice"><b>Deutsche Stimme:</b></label>
+<select id="voice"><option value="">automatisch</option></select>
+<button id="voiceTest" type="button">Stimme + Betonung testen</button>
+</div>
+
+<div class="row" style="font-size:15px;display:none">
+<label><input id="stretchOpen" type="checkbox" checked>
+offene 1. Silbe bei zweisilbigen Wörtern leicht dehnen (Test)</label>
+</div>
+
+
+<div style="font-size:13px;color:#666">V6: Der Film läuft während deiner Mikrofonaufnahme. Danach kannst du Film + Ton prüfen und die Aufnahme übernehmen oder neu aufnehmen.</div>
+</div>
+
+<div id="stage">
+<div id="wordbox"></div>
+<div id="count"></div>
+<div id="recPanel" style="display:none;position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:20;text-align:center;background:rgba(255,255,255,.94);padding:10px;border-radius:12px;min-width:280px">
+  <div id="recStatus" style="font-size:15px;margin-bottom:8px">Bereit zur Aufnahme</div>
+  <button id="recordBtn">🎙 Aufnahme starten</button>
+  <button id="previewBtn" style="display:none">▶ Film + Ton ansehen</button>
+  <button id="acceptBtn" style="display:none">✓ So ist es gut</button>
+  <button id="retryBtn" style="display:none">↻ Neu aufnehmen</button>
+</div>
+<button id="next">Nächstes Wort / neuer Film</button>
+</div>
+
+<script>
+const setup=document.getElementById("setup"),stage=document.getElementById("stage"),
+wordbox=document.getElementById("wordbox"),next=document.getElementById("next"),
+input=document.getElementById("input"),tempo=document.getElementById("tempo"),
+voiceSelect=document.getElementById("voice"),stretchOpen=document.getElementById("stretchOpen");
+const GAP="0.04em";
+let model=null, revealCount=0, manual=false, busy=false;
+
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+function parse(raw){
+  let units=[], spoken="", displayParts=[], syllableId=0, wordId=0, atSyllableStart=true;
+  const wordSyllables={};
+
+  const lines=raw.replace(/\r/g,"").split("\n");
+  lines.forEach((line,li)=>{
+    const words=line.split("/");
+    words.forEach((word,wi)=>{
+      const trimmed=word.replace(/^\s+|\s+$/g,"");
+      const parts=trimmed.match(/\S+|\s+/g)||[];
+      let syllableIndex=0;
+
+      parts.forEach(part=>{
+        if(/^\s+$/.test(part)){
+          if(part.length>=2){
+            syllableId++;
+            syllableIndex++;
+            atSyllableStart=true;
+            displayParts.push({type:"syllgap"});
+          }
+        } else {
+          const u={
+            text:part,
+            syllable:syllableId,
+            syllableStart:atSyllableStart,
+            wordId,
+            syllableIndex
+          };
+          units.push(u);
+          displayParts.push({type:"unit",unit:u});
+          spoken+=part;
+          atSyllableStart=false;
+        }
+      });
+
+      wordSyllables[wordId]=syllableIndex+1;
+
+      if(wi<words.length-1){
+        displayParts.push({type:"wordspace"});
+        spoken+=" ";
+        syllableId++;
+        wordId++;
+        atSyllableStart=true;
+      }
+    });
+
+    if(li<lines.length-1){
+      displayParts.push({type:"newline"});
+      spoken+=" ";
+      syllableId++;
+      wordId++;
+      atSyllableStart=true;
+    }
+  });
+
+  const syl={};
+  units.forEach(u=>(syl[u.syllable]??=[]).push(u.text));
+  units.forEach(u=>{
+    u.syllableText=syl[u.syllable].join("");
+    u.wordSyllableCount=wordSyllables[u.wordId] || 1;
+  });
+
+  return {units,displayParts,spoken:spoken.replace(/\s+/g," ").trim()};
+}
+function buildDisplay(visibleCount, full=false){
+  wordbox.innerHTML="";
+  let seen=0;
+  let word=document.createElement("span");
+  word.style.display="inline-block";
+  word.style.whiteSpace="nowrap";
+  wordbox.appendChild(word);
+
+  function newWord(){
+    word=document.createElement("span");
+    word.style.display="inline-block";
+    word.style.whiteSpace="nowrap";
+    wordbox.appendChild(word);
+  }
+
+  for(const p of model.displayParts){
+    if(p.type==="unit"){
+      const span=document.createElement("span");
+      span.textContent=p.unit.text;
+      span.style.visibility=(full||seen<visibleCount)?"visible":"hidden";
+      word.appendChild(span);
+      seen++;
+    } else if(p.type==="syllgap"){
+      const g=document.createElement("span");
+      g.style.display="inline-block";
+      g.style.width=GAP;
+      word.appendChild(g);
+    } else if(p.type==="wordspace"){
+      wordbox.appendChild(document.createTextNode(" "));
+      newWord();
+    } else if(p.type==="newline"){
+      wordbox.appendChild(document.createElement("br"));
+      newWord();
+    }
+  }
+}
+function fitAndCenter(){
+  buildDisplay(model.units.length,true);
+  const chars=model.spoken.length;
+  let fs = chars<=14 ? 118 : chars<=28 ? 92 : 76;
+  wordbox.style.fontSize=fs+"px";
+  wordbox.style.width="auto";
+  wordbox.style.maxWidth="90vw";
+  if(chars>18) wordbox.style.width="88vw";
+  const maxH=innerHeight*0.72;
+  while(wordbox.scrollHeight>maxH && fs>38){
+    fs-=2; wordbox.style.fontSize=fs+"px";
+  }
+  const r=wordbox.getBoundingClientRect();
+  const w=(chars>18 ? innerWidth*0.88 : r.width);
+  wordbox.style.left=Math.max(12,(innerWidth-w)/2)+"px";
+  wordbox.style.top=Math.max(12,(innerHeight-r.height)/2)+"px";
+}
+function speak(text, rate=.70, pitch=1.0, volume=1.0){
+  try{
+    const u=new SpeechSynthesisUtterance(text);
+    u.lang="de-DE";
+    const v=selectedVoice();
+    if(v) u.voice=v;
+    u.rate=rate; u.pitch=pitch; u.volume=volume;
+    speechSynthesis.speak(u);
+  }catch(e){}
+  return Promise.resolve();
+}
+function syllableSpeechText(u){
+  let t=u.syllableText;
+  if(!stretchOpen.checked) return t;
+
+  // Experimental helper requested for examples such as Schu-le / I-gel.
+  // Only the isolated first syllable is altered; the complete word never is.
+  if(u.syllableIndex===0 && u.wordSyllableCount===2 && /[aeiouyäöüAEIOUYÄÖÜ]$/.test(t)){
+    const last=t.slice(-1);
+    t=t+last.toLowerCase()+last.toLowerCase();
+  }
+  return t;
+}
+
+function syllableProsody(u){
+  if(u.wordSyllableCount===2){
+    if(u.syllableIndex===0){
+      // "Klatschen": klarer, kräftiger Akzent.
+      return {rate:.57, pitch:1.10, volume:1.0};
+    } else if(u.syllableIndex===1){
+      // "Streichen": weicher, etwas tiefer und leiser auslaufen.
+      return {rate:.68, pitch:.92, volume:.76};
+    }
+  }
+  return {rate:.62, pitch:1.0, volume:.95};
+}
+
+function speakSyllable(u){
+  const p=syllableProsody(u);
+  speak(syllableSpeechText(u),p.rate,p.pitch,p.volume);
+}
+
+async function testVoice(){
+  const b=document.getElementById("voiceTest");
+  b.disabled=true;
+
+  // Natural whole word first.
+  for(const w of ["Schule","Igel","Lampe"]){
+    await speak(w,.70,1.0,1.0);
+    await sleep(650);
+  }
+
+  // Then explicitly demonstrate 1st-syllable stress:
+  const demo = [
+    [{t:"Schuuu",i:0},{t:"le",i:1}],
+    [{t:"Iii",i:0},{t:"gel",i:1}],
+    [{t:"Lam",i:0},{t:"pe",i:1}]
+  ];
+  for(const pair of demo){
+    for(const x of pair){
+      const dummy={syllableText:x.t, syllableIndex:x.i, wordSyllableCount:2};
+      const p=syllableProsody(dummy);
+      await speak(x.t,p.rate,p.pitch,p.volume);
+      await sleep(x.i===0?180:480);
+    }
+    await sleep(600);
+  }
+  b.disabled=false;
+}
+document.getElementById("voiceTest").onclick=testVoice;
+
+async function visualSequence(){
+  buildDisplay(model.units.length,true); wordbox.style.visibility="visible";
+  await sleep(1300); await sleep(950); await sleep(1300); await sleep(700);
+  wordbox.style.visibility="hidden"; await sleep(200); buildDisplay(0,false); wordbox.style.visibility="visible";
+  let lastSyllable=null;
+  for(let i=0;i<model.units.length;i++){
+    const u=model.units[i];
+    if(u.syllable!==lastSyllable){ await sleep(900); lastSyllable=u.syllable; }
+    buildDisplay(i+1,false);
+    if(i<model.units.length-1){ const n=model.units[i+1]; await sleep(n.syllable===u.syllable?currentTiming().grapheme:currentTiming().syllable); }
+  }
+  await sleep(1900);
+}
+function currentTiming(){ const v=tempo.value; if(v==="slow")return {grapheme:1250,syllable:500}; if(v==="normal")return {grapheme:470,syllable:180}; return {grapheme:650,syllable:240}; }
+
+let mediaRecorder=null, chunks=[], audioBlob=null, audioURL=null, micStream=null, recording=false;
+const recPanel=document.getElementById("recPanel"), recStatus=document.getElementById("recStatus"), recordBtn=document.getElementById("recordBtn"), previewBtn=document.getElementById("previewBtn"), acceptBtn=document.getElementById("acceptBtn"), retryBtn=document.getElementById("retryBtn");
+async function countdown(){ const c=document.getElementById("count"); c.style.display="flex"; for(const n of [3,2,1]){c.textContent=n;await sleep(650);} c.style.display="none"; }
+async function ensureMic(){ if(micStream)return micStream; if(!navigator.mediaDevices?.getUserMedia) throw new Error("Mikrofon ist hier nicht verfügbar. Bitte V6 später über HTTPS öffnen."); micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}}); return micStream; }
+async function makeRecording(){
+ try{
+  recordBtn.disabled=true; previewBtn.style.display=acceptBtn.style.display=retryBtn.style.display="none";
+  recStatus.textContent="Mikrofon wird vorbereitet …"; const stream=await ensureMic(); chunks=[];
+  const types=["audio/webm;codecs=opus","audio/webm","audio/mp4"]; let opt={}; for(const t of types){if(window.MediaRecorder?.isTypeSupported?.(t)){opt={mimeType:t};break;}}
+  mediaRecorder=new MediaRecorder(stream,opt); mediaRecorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+  await countdown(); recPanel.style.display="none"; buildDisplay(0,false); fitAndCenter();
+  mediaRecorder.start(); recording=true; await visualSequence();
+  const stopped=new Promise(r=>mediaRecorder.onstop=r); mediaRecorder.stop(); await stopped; recording=false;
+  audioBlob=new Blob(chunks,{type:mediaRecorder.mimeType||"audio/webm"}); if(audioURL)URL.revokeObjectURL(audioURL); audioURL=URL.createObjectURL(audioBlob);
+  recPanel.style.display="block"; recStatus.textContent="Aufnahme fertig – jetzt prüfen"; previewBtn.style.display=acceptBtn.style.display=retryBtn.style.display="inline-block";
+ }catch(e){recPanel.style.display="block";recStatus.textContent="Mikrofonproblem: "+e.message;recordBtn.disabled=false;}
+}
+async function preview(){
+ if(!audioURL)return; previewBtn.disabled=true; recPanel.style.display="none"; buildDisplay(0,false); fitAndCenter();
+ const a=new Audio(audioURL); a.play().catch(()=>{}); await visualSequence(); a.pause(); recPanel.style.display="block"; previewBtn.disabled=false;
+}
+recordBtn.onclick=makeRecording; previewBtn.onclick=preview; retryBtn.onclick=()=>{audioBlob=null;if(audioURL){URL.revokeObjectURL(audioURL);audioURL=null;}recordBtn.disabled=false;recordBtn.click();};
+acceptBtn.onclick=()=>{recStatus.textContent="✓ Aufnahme übernommen"; previewBtn.style.display=acceptBtn.style.display=retryBtn.style.display="none"; next.style.display="inline-block";};
+async function run(){ model=parse(input.value); if(!model.units.length)return; setup.style.display="none";stage.style.display="block";next.style.display="none";recPanel.style.display="block";recStatus.textContent="Bereit: Aufnahme startet mit 3–2–1";recordBtn.disabled=false;recordBtn.style.display="inline-block";previewBtn.style.display=acceptBtn.style.display=retryBtn.style.display="none"; try{await document.documentElement.requestFullscreen?.();}catch(e){} fitAndCenter(); }
+document.getElementById("start").onclick=run;
+next.onclick=e=>{e.stopPropagation(); if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null;} if(audioURL){URL.revokeObjectURL(audioURL);audioURL=null;} stage.style.display="none";setup.style.display="flex";next.style.display="none";recPanel.style.display="none";document.exitFullscreen?.().catch(()=>{});};
+</script>
+</body></html>
